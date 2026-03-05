@@ -27,6 +27,7 @@ pub fn checkOTelJavaAgentJarAndGetModifiedJavaToolOptionsValue(
         original_value_optional,
         configuration.jvm_auto_instrumentation_agent_path,
         configuration.jvm_instrumentation_disabled,
+        configuration.mode,
     );
 }
 
@@ -35,6 +36,7 @@ fn doCheckOTelJavaAgentJarAndGetModifiedJavaToolOptionsValue(
     original_value_optional: ?[:0]const u8,
     jvm_auto_instrumentation_agent_path: []u8,
     jvm_instrumentation_disabled: bool,
+    mode: config.InstrumentationMode,
 ) ?[:0]u8 {
     if (jvm_instrumentation_disabled or jvm_auto_instrumentation_agent_path.len == 0) {
         print.printInfo("Skipping the injection of the OpenTelemetry Java agent in \"JAVA_TOOL_OPTIONS\" because it has been explicitly disabled.", .{});
@@ -57,6 +59,7 @@ fn doCheckOTelJavaAgentJarAndGetModifiedJavaToolOptionsValue(
         gpa,
         original_value_optional,
         javaagent_flag_value,
+        mode,
     );
 }
 
@@ -69,6 +72,7 @@ test "doCheckOTelJavaAgentJarAndGetModifiedJavaToolOptionsValue: should return n
             null,
             path,
             true,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_java_tool_options == null, "modified_java_tool_options == null");
 }
@@ -82,6 +86,7 @@ test "doCheckOTelJavaAgentJarAndGetModifiedJavaToolOptionsValue: should return n
             null,
             path,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_java_tool_options == null, "modified_java_tool_options == null");
 }
@@ -95,6 +100,7 @@ test "doCheckOTelJavaAgentJarAndGetModifiedJavaToolOptionsValue: should return n
             null,
             path,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_java_tool_options == null, "modified_java_tool_options == null");
 }
@@ -108,6 +114,7 @@ test "doCheckOTelJavaAgentJarAndGetModifiedJavaToolOptionsValue: should return n
             "original value",
             path,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_java_tool_options == null, "modified_java_tool_options == null");
 }
@@ -116,16 +123,28 @@ fn getModifiedJavaToolOptionsValue(
     gpa: std.mem.Allocator,
     original_java_tool_options_env_var_value_optional: ?[:0]const u8,
     javaagent_flag_value: [:0]u8,
+    mode: config.InstrumentationMode,
 ) ?[:0]u8 {
     // For auto-instrumentation, we inject the -javaagent flag into the JAVA_TOOL_OPTIONS environment variable.
     if (original_java_tool_options_env_var_value_optional) |original_java_tool_options_env_var_value| {
         if (std.mem.indexOf(u8, original_java_tool_options_env_var_value, javaagent_flag_value)) |_| {
-            // If our "-javaagent ..." flag is already present in JAVA_TOOL_OPTIONS, do nothing. This is particularly
-            // important to avoid double injection, for example if we are injecting into a container which has a shell
-            // executable as its entry point (into which we inject env var modifications), and then this shell starts
-            // the JVM executable as a child process, which inherits the environment from the already injected shell.
-            gpa.free(javaagent_flag_value);
-            return null;
+            // Our exact "-javaagent ..." flag is already present — double injection (e.g. shell → JVM child process).
+            if (mode == .install) {
+                print.printWarn("mode=install: our -javaagent flag is already present in JAVA_TOOL_OPTIONS, forcing re-injection.", .{});
+            } else {
+                gpa.free(javaagent_flag_value);
+                return null;
+            }
+        }
+
+        // Check for a foreign -javaagent: flag (not ours) — indicates existing instrumentation.
+        if (mode == .install_unless_conflict and std.mem.indexOf(u8, original_java_tool_options_env_var_value, "-javaagent:") != null) {
+            // There's a -javaagent flag but it's not ours (we already checked for our exact flag above).
+            if (std.mem.indexOf(u8, original_java_tool_options_env_var_value, javaagent_flag_value) == null) {
+                print.printInfo("mode=install_unless_conflict: existing -javaagent detected in JAVA_TOOL_OPTIONS, backing off.", .{});
+                gpa.free(javaagent_flag_value);
+                return null;
+            }
         }
 
         // If JAVA_TOOL_OPTIONS is already set, prepend the "-javaagent ..." flag to the original value.
@@ -155,6 +174,7 @@ test "getModifiedJavaToolOptionsValue: should return -javaagent if original valu
         testing.allocator,
         null,
         javaagent_flag_value,
+        .install_unless_conflict,
     );
     defer (if (modified_java_tool_options) |val| {
         testing.allocator.free(val);
@@ -177,6 +197,7 @@ test "getModifiedJavaToolOptionsValue: should append -javaagent if original valu
         testing.allocator,
         original_value,
         javaagent_flag_value,
+        .install_unless_conflict,
     );
     defer (if (modified_java_tool_options) |val| {
         testing.allocator.free(val);
@@ -199,6 +220,7 @@ test "getModifiedJavaToolOptionsValue: should do nothing if our -javaagent is al
         testing.allocator,
         original_value,
         javaagent_flag_value,
+        .install_unless_conflict,
     );
     try test_util.expectWithMessage(modified_java_tool_options == null, "modified_java_tool_options == null");
 }

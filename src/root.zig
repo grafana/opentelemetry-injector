@@ -71,6 +71,11 @@ fn initEnviron() callconv(.c) void {
     var configuration = config.readConfiguration(allocator);
     defer configuration.deinit(allocator);
 
+    if (configuration.mode == .skip) {
+        print.printInfo("mode=skip, skipping injection.", .{});
+        return;
+    }
+
     if (!evaluateAllowDeny(allocator, configuration)) {
         return;
     }

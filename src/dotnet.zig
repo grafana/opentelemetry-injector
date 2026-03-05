@@ -77,10 +77,10 @@ pub fn getDotnetValues(
     gpa: std.mem.Allocator,
     configuration: config.InjectorConfiguration,
 ) ?DotnetValues {
-    return doGetDotnetValues(gpa, configuration.dotnet_auto_instrumentation_agent_path_prefix, configuration.dotnet_instrumentation_disabled);
+    return doGetDotnetValues(gpa, configuration.dotnet_auto_instrumentation_agent_path_prefix, configuration.dotnet_instrumentation_disabled, configuration.mode);
 }
 
-fn doGetDotnetValues(gpa: std.mem.Allocator, dotnet_path_prefix: []u8, dotnet_instrumentation_disabled: bool) ?DotnetValues {
+fn doGetDotnetValues(gpa: std.mem.Allocator, dotnet_path_prefix: []u8, dotnet_instrumentation_disabled: bool, mode: config.InstrumentationMode) ?DotnetValues {
     if (dotnet_instrumentation_disabled or dotnet_path_prefix.len == 0) {
         print.printInfo("Skipping the injection of the .NET OpenTelemetry instrumentation because it has been explicitly disabled.", .{});
         return null;
@@ -93,6 +93,30 @@ fn doGetDotnetValues(gpa: std.mem.Allocator, dotnet_path_prefix: []u8, dotnet_in
     if (libc_flavor == types.LibCFlavor.UNKNOWN) {
         print.printError("Cannot determine libc flavor", .{});
         return null;
+    }
+
+    // Check for existing .NET profiler (conflict detection).
+    if (std.posix.getenv(coreclr_enable_profiling_env_var_name)) |existing_profiling| {
+        if (std.mem.eql(u8, existing_profiling, coreclr_enable_profiling_value)) {
+            // Profiling is already enabled — check if it's our profiler or a foreign one.
+            if (std.posix.getenv(coreclr_profiler_env_var_name)) |existing_profiler| {
+                if (std.mem.eql(u8, existing_profiler, coreclr_profiler_value)) {
+                    // Our exact profiler GUID is already set — double injection.
+                    if (mode == .install) {
+                        print.printWarn("mode=install: our .NET profiler is already configured, forcing re-injection.", .{});
+                    } else {
+                        return null;
+                    }
+                } else {
+                    // Foreign profiler detected.
+                    if (mode == .install_unless_conflict) {
+                        print.printInfo("mode=install_unless_conflict: existing .NET profiler {s} detected, backing off.", .{existing_profiler});
+                        return null;
+                    }
+                    print.printWarn("mode=install: overriding existing .NET profiler {s} with ours.", .{existing_profiler});
+                }
+            }
+        }
     }
 
     if (cached_dotnet_values.done) {
@@ -155,7 +179,7 @@ test "doGetDotnetValues: should return null value if the libc flavor has not bee
     defer allocator.free(path);
 
     libc_flavor = null;
-    const dotnet_values = doGetDotnetValues(allocator, path, false);
+    const dotnet_values = doGetDotnetValues(allocator, path, false, .install_unless_conflict);
     try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
 }
 
@@ -168,7 +192,7 @@ test "doGetDotnetValues: should return null value if dotnet_instrumentation_disa
     defer allocator.free(path);
 
     libc_flavor = .GNU;
-    const dotnet_values = doGetDotnetValues(allocator, path, true);
+    const dotnet_values = doGetDotnetValues(allocator, path, true, .install_unless_conflict);
     try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
 }
 
@@ -181,7 +205,7 @@ test "doGetDotnetValues: should return null value if dotnet_path_prefix is the e
     defer allocator.free(path);
 
     libc_flavor = .GNU;
-    const dotnet_values = doGetDotnetValues(allocator, path, false);
+    const dotnet_values = doGetDotnetValues(allocator, path, false, .install_unless_conflict);
     try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
 }
 
@@ -194,7 +218,7 @@ test "doGetDotnetValues: should return null value if the profiler path cannot be
     defer allocator.free(path);
 
     libc_flavor = .GNU;
-    const dotnet_values = doGetDotnetValues(allocator, path, false);
+    const dotnet_values = doGetDotnetValues(allocator, path, false, .install_unless_conflict);
     try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
 }
 

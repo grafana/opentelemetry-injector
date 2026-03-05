@@ -45,6 +45,16 @@ const exclude_args_env_var = "OTEL_INJECTOR_EXCLUDE_WITH_ARGUMENTS";
 const disable_injector_env_var = "OTEL_INJECTOR_DISABLED";
 const auto_instrumentation_disabled_env_var = "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED";
 
+/// Instrumentation mode, set by the operator via OTEL_INJECTOR_MODE.
+const mode_env_var = "OTEL_INJECTOR_MODE";
+const mode_key = "mode";
+
+pub const InstrumentationMode = enum {
+    install,
+    skip,
+    install_unless_conflict,
+};
+
 pub const InjectorConfiguration = struct {
     dotnet_auto_instrumentation_agent_path_prefix: []u8,
     jvm_auto_instrumentation_agent_path: []u8,
@@ -57,6 +67,7 @@ pub const InjectorConfiguration = struct {
     include_args: [][]const u8,
     exclude_args: [][]const u8,
     disabled: bool,
+    mode: InstrumentationMode,
     dotnet_instrumentation_disabled: bool,
     jvm_instrumentation_disabled: bool,
     nodejs_instrumentation_disabled: bool,
@@ -146,6 +157,7 @@ fn createEmptyConfiguration(allocator: std.mem.Allocator) InjectorConfiguration 
         .include_args = &.{},
         .exclude_args = &.{},
         .disabled = false,
+        .mode = .install_unless_conflict,
         .dotnet_instrumentation_disabled = false,
         .jvm_instrumentation_disabled = false,
         .nodejs_instrumentation_disabled = false,
@@ -535,6 +547,7 @@ fn createDefaultConfiguration(arena_allocator: std.mem.Allocator) std.mem.Alloca
         .include_args = &.{},
         .exclude_args = &.{},
         .disabled = false,
+        .mode = .install_unless_conflict,
         .dotnet_instrumentation_disabled = false,
         .jvm_instrumentation_disabled = false,
         .nodejs_instrumentation_disabled = false,
@@ -578,6 +591,21 @@ fn applyAutoInstrumentationDisabledValue(trimmed_value: []const u8, source: []co
     }
 }
 
+fn applyModeValue(trimmed_value: []const u8, source: []const u8, configuration: *InjectorConfiguration) void {
+    if (std.mem.eql(u8, trimmed_value, "install")) {
+        configuration.mode = .install;
+    } else if (std.mem.eql(u8, trimmed_value, "skip")) {
+        configuration.mode = .skip;
+    } else if (std.mem.eql(u8, trimmed_value, "install_unless_conflict")) {
+        configuration.mode = .install_unless_conflict;
+    } else if (trimmed_value.len > 0) {
+        print.printWarn(
+            "Unknown mode value from {s}: \"{s}\" — using default (install_unless_conflict).",
+            .{ source, trimmed_value },
+        );
+    }
+}
+
 fn applyCommaSeparatedPatternsOption(arena_allocator: std.mem.Allocator, setting: *[][]const u8, value: []u8, pattern_name: []const u8, cfg_file_path: []const u8) void {
     const new_patterns = patterns_util.splitByComma(arena_allocator, value) catch |err| {
         print.printError("error parsing {s} value from configuration file {s}: {}", .{ pattern_name, cfg_file_path, err });
@@ -610,6 +638,8 @@ fn applyKeyValueToGeneralOptions(arena_allocator: std.mem.Allocator, key: []cons
         applyCommaSeparatedPatternsOption(arena_allocator, &_configuration.exclude_args, value, "exclude_arguments", _cfg_file_path);
     } else if (std.mem.eql(u8, key, auto_instrumentation_disabled_key)) {
         applyAutoInstrumentationDisabledValue(value, _cfg_file_path, _configuration);
+    } else if (std.mem.eql(u8, key, mode_key)) {
+        applyModeValue(value, _cfg_file_path, _configuration);
     } else {
         print.printError("ignoring unknown configuration key in {s}: {s}={s}", .{ _cfg_file_path, key, value });
     }
@@ -734,6 +764,7 @@ fn copyToPermanentlyAllocatedHeap(
         .include_args = try copyStringArray(allocator, preliminary_configuration.include_args),
         .exclude_args = try copyStringArray(allocator, preliminary_configuration.exclude_args),
         .disabled = false,
+        .mode = preliminary_configuration.mode,
         .dotnet_instrumentation_disabled = preliminary_configuration.dotnet_instrumentation_disabled,
         .jvm_instrumentation_disabled = preliminary_configuration.jvm_instrumentation_disabled,
         .nodejs_instrumentation_disabled = preliminary_configuration.nodejs_instrumentation_disabled,
@@ -1322,6 +1353,10 @@ fn readConfigurationFromEnvironment(arena_allocator: std.mem.Allocator, configur
             print.printError("error parsing exclude_arguments value from the environment {s}: {}", .{ exclude_args_value, err });
             return;
         };
+    }
+    if (std.posix.getenv(mode_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        applyModeValue(trimmed_value, mode_env_var, configuration);
     }
 }
 

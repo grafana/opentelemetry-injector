@@ -33,6 +33,7 @@ pub fn checkPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue(
         original_value_optional,
         configuration.python_auto_instrumentation_agent_path_prefix,
         configuration.python_instrumentation_disabled,
+        configuration.mode,
     );
 }
 
@@ -41,6 +42,7 @@ fn doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue(
     original_value_optional: ?[:0]const u8,
     python_auto_instrumentation_agent_path_prefix: []u8,
     python_instrumentation_disabled: bool,
+    mode: config.InstrumentationMode,
 ) ?[:0]u8 {
     if (python_instrumentation_disabled or python_auto_instrumentation_agent_path_prefix.len == 0) {
         print.printInfo("Skipping the injection of the Python OpenTelemetry auto-instrumentation because it has been explicitly disabled.", .{});
@@ -79,6 +81,7 @@ fn doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue(
                 gpa,
                 original_value_optional,
                 python_auto_instrumentation_agent_path,
+                mode,
             );
         } else {
             return null;
@@ -102,6 +105,7 @@ test "doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue: should
             null,
             path_prefix,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_pythonpath_value == null, "modified_pythonpath_value == null");
 }
@@ -121,6 +125,7 @@ test "doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue: should
             null,
             path_prefix,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_pythonpath_value == null, "modified_pythonpath_value == null");
 }
@@ -140,6 +145,7 @@ test "doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue: should
             null,
             path_prefix,
             true,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_pythonpath_value == null, "modified_pythonpath_value == null");
 }
@@ -159,6 +165,7 @@ test "doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue: should
             null,
             path_prefix,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_pythonpath_value == null, "modified_pythonpath_value == null");
 }
@@ -178,6 +185,7 @@ test "doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue: should
             null,
             path_prefix,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_pythonpath_value == null, "modified_pythonpath_value == null");
 }
@@ -197,6 +205,7 @@ test "doCheckPythonAutoInstrumentationAgentAndGetModifiedPythonpathValue: should
             "/another/path"[0.. :0],
             path_prefix,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_pythonpath_value == null, "modified_pythonpath_value == null");
 }
@@ -271,19 +280,23 @@ fn getModifiedPythonpathValue(
     gpa: std.mem.Allocator,
     original_value_optional: ?[:0]const u8,
     python_auto_instrumentation_agent_path: [:0]u8,
+    mode: config.InstrumentationMode,
 ) ?[:0]u8 {
     if (original_value_optional) |original_value| {
         if (std.mem.indexOf(u8, original_value, python_auto_instrumentation_agent_path)) |_| {
-            // If the correct path flag is already present in PYTHONPATH, do nothing. This is particularly important
-            // to avoid double injection, for example if we are injecting into a container which has a shell
-            // executable as its entry point (into which we inject env var modifications), and then this shell starts
-            // the Python executable as a child process, which inherits the environment from the already injected
-            // shell.
-            gpa.free(python_auto_instrumentation_agent_path);
-            return null;
+            // Our exact path is already present — double injection (e.g. shell → Python child process).
+            if (mode == .install) {
+                print.printWarn("mode=install: our path is already present in PYTHONPATH, forcing re-injection.", .{});
+            } else {
+                gpa.free(python_auto_instrumentation_agent_path);
+                return null;
+            }
         }
 
-        // If PYTHONPATH is already set, prepend the our directory to the original value. Since we copy over
+        // Note: There is no reliable way to detect foreign Python instrumentation from PYTHONPATH alone,
+        // so install_unless_conflict behaves the same as install here (beyond the double-injection check above).
+
+        // If PYTHONPATH is already set, prepend our directory to the original value. Since we copy over
         // python_auto_instrumentation_agent_path into newly allocated memory, we can free the parameter here.
         defer gpa.free(python_auto_instrumentation_agent_path);
         return std.fmt.allocPrintSentinel(
@@ -314,6 +327,7 @@ test "getModifiedPythonpathValue: should return the auto-instrumentation directo
             allocator,
             null,
             python_auto_instrumentation_agent_path,
+            .install_unless_conflict,
         );
     defer (if (modified_pythonpath_value) |val| {
         allocator.free(val);
@@ -338,6 +352,7 @@ test "getModifiedPythonpathValue: should prepend the auto-instrumentation direct
             allocator,
             original_value,
             python_auto_instrumentation_agent_path,
+            .install_unless_conflict,
         );
     defer (if (modified_pythonpath_value) |val| {
         allocator.free(val);
@@ -362,6 +377,7 @@ test "getModifiedPythonpathValue: should return null if the auto-instrumentation
             allocator,
             original_value,
             python_auto_instrumentation_agent_path,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_pythonpath_value == null, "modified_pythonpath_value == null");
 }

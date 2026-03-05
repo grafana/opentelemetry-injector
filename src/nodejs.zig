@@ -27,6 +27,7 @@ pub fn checkNodeJsAutoInstrumentationAgentAndGetModifiedNodeOptionsValue(
         original_value_optional,
         configuration.nodejs_auto_instrumentation_agent_path,
         configuration.nodejs_instrumentation_disabled,
+        configuration.mode,
     );
 }
 
@@ -35,6 +36,7 @@ fn doCheckNodeJsAutoInstrumentationAgentAndGetModifiedNodeOptionsValue(
     original_value_optional: ?[:0]const u8,
     nodejs_auto_instrumentation_agent_path: []u8,
     nodejs_instrumentation_disabled: bool,
+    mode: config.InstrumentationMode,
 ) ?[:0]u8 {
     if (nodejs_instrumentation_disabled or nodejs_auto_instrumentation_agent_path.len == 0) {
         print.printInfo("Skipping the injection of the Node.js OpenTelemetry auto-instrumentation because it has been explicitly disabled.", .{});
@@ -58,6 +60,7 @@ fn doCheckNodeJsAutoInstrumentationAgentAndGetModifiedNodeOptionsValue(
         gpa,
         original_value_optional,
         require_nodejs_auto_instrumentation_agent,
+        mode,
     );
 }
 
@@ -70,6 +73,7 @@ test "doCheckNodeJsAutoInstrumentationAgentAndGetModifiedNodeOptionsValue: shoul
             null,
             path,
             true,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_node_options_value == null, "modified_node_options_value == null");
 }
@@ -83,6 +87,7 @@ test "doCheckNodeJsAutoInstrumentationAgentAndGetModifiedNodeOptionsValue: shoul
             null,
             path,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_node_options_value == null, "modified_node_options_value == null");
 }
@@ -96,6 +101,7 @@ test "doCheckNodeJsAutoInstrumentationAgentAndGetModifiedNodeOptionsValue: shoul
             null,
             path,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_node_options_value == null, "modified_node_options_value == null");
 }
@@ -109,6 +115,7 @@ test "doCheckNodeJsAutoInstrumentationAgentAndGetModifiedNodeOptionsValue: shoul
             "--abort-on-uncaught-exception"[0.. :0],
             path,
             false,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_node_options_value == null, "modified_node_options_value == null");
 }
@@ -117,16 +124,27 @@ fn getModifiedNodeOptionsValue(
     gpa: std.mem.Allocator,
     original_value_optional: ?[:0]const u8,
     require_nodejs_auto_instrumentation_agent: [:0]u8,
+    mode: config.InstrumentationMode,
 ) ?[:0]u8 {
     if (original_value_optional) |original_value| {
         if (std.mem.indexOf(u8, original_value, require_nodejs_auto_instrumentation_agent)) |_| {
-            // If the correct "--require ..." flag is already present in NODE_OPTIONS, do nothing. This is particularly
-            // important to avoid double injection, for example if we are injecting into a container which has a shell
-            // executable as its entry point (into which we inject env var modifications), and then this shell starts
-            // the Node.js executable as a child process, which inherits the environment from the already injected
-            // shell.
-            gpa.free(require_nodejs_auto_instrumentation_agent);
-            return null;
+            // Our exact "--require ..." flag is already present — double injection (e.g. shell → Node.js child process).
+            if (mode == .install) {
+                print.printWarn("mode=install: our --require flag is already present in NODE_OPTIONS, forcing re-injection.", .{});
+            } else {
+                gpa.free(require_nodejs_auto_instrumentation_agent);
+                return null;
+            }
+        }
+
+        // Check for a foreign --require flag (not ours) — indicates existing instrumentation.
+        if (mode == .install_unless_conflict and std.mem.indexOf(u8, original_value, "--require") != null) {
+            // There's a --require flag but it's not ours (we already checked for our exact flag above).
+            if (std.mem.indexOf(u8, original_value, require_nodejs_auto_instrumentation_agent) == null) {
+                print.printInfo("mode=install_unless_conflict: existing --require detected in NODE_OPTIONS, backing off.", .{});
+                gpa.free(require_nodejs_auto_instrumentation_agent);
+                return null;
+            }
         }
 
         // If NODE_OPTIONS is already set, prepend the "--require ..." flag to the original value.
@@ -160,6 +178,7 @@ test "getModifiedNodeOptionsValue: should return --require if original value is 
             testing.allocator,
             null,
             require_nodejs_auto_instrumentation_agent,
+            .install_unless_conflict,
         );
     defer (if (modified_node_options_value) |val| {
         testing.allocator.free(val);
@@ -183,6 +202,7 @@ test "getModifiedNodeOptionsValue: should prepend --require if original value ex
             testing.allocator,
             original_value,
             require_nodejs_auto_instrumentation_agent,
+            .install_unless_conflict,
         );
     defer (if (modified_node_options_value) |val| {
         testing.allocator.free(val);
@@ -206,6 +226,7 @@ test "getModifiedNodeOptionsValue: should do nothing if our --require is already
             testing.allocator,
             original_value,
             require_nodejs_auto_instrumentation_agent,
+            .install_unless_conflict,
         );
     try test_util.expectWithMessage(modified_node_options_value == null, "modified_node_options_value == null");
 }
