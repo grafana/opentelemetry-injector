@@ -1,0 +1,43 @@
+# Single-step Dockerfile to build the injector image from source for operator e2e tests.
+# Build context: the opentelemetry-injector repo root.
+#
+# Usage:
+#   cd ~/source/opentelemetry-injector
+#   docker build -f Dockerfile.operator-e2e -t local/injector:dev .
+#   kind load docker-image local/injector:dev --name otel-operator-e2e
+
+ARG DOCKER_REPO=docker.io
+FROM ${DOCKER_REPO}/alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS build
+
+RUN apk add --no-cache make wget
+
+ARG ZIG_ARCHITECTURE=x86_64
+
+RUN mkdir -p /opt/zig
+WORKDIR /opt/zig
+COPY zig-version .
+RUN . /opt/zig/zig-version && \
+  wget -q -O /tmp/zig.tar.gz https://ziglang.org/download/${ZIG_VERSION%-*}/zig-${ZIG_ARCHITECTURE}-linux-${ZIG_VERSION}.tar.xz && \
+  tar --strip-components=1 -xf /tmp/zig.tar.gz
+ENV PATH="$PATH:/opt/zig"
+
+WORKDIR /libotelinject
+COPY Makefile build.zig build.zig.zon ./
+COPY src src
+
+RUN make ARCH=amd64 SHELL=/bin/sh all
+
+FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+
+RUN mkdir -p /autoinstrumentation/injector
+COPY --from=build /libotelinject/so/libotelinject.so /autoinstrumentation/libotelinject.so
+
+# Inline the default config — matches images/injector/otelinject.conf in the operator repo.
+RUN printf '%s\n' \
+  'jvm_auto_instrumentation_agent_path=/otel/javaagent.jar' \
+  'nodejs_auto_instrumentation_agent_path=/otel/register.js' \
+  'python_auto_instrumentation_agent_path_prefix=/otel/python' \
+  'dotnet_auto_instrumentation_agent_path_prefix=/otel/dotnet' \
+  > /autoinstrumentation/injector/otelinject.conf
+
+CMD ["true"]
